@@ -73,7 +73,11 @@ let current: AppSnapshot = {
     resetCreditsAvailable: 2,
     resetCreditsApplicable: 1,
   },
-  preferences: { launchAtLogin: false, onboardingComplete: true },
+  preferences: {
+    launchAtLogin: false,
+    onboardingComplete: true,
+    themeMode: "system",
+  },
   diagnostics: [
     { at: new Date().toISOString(), category: "bridge", outcome: "complete", durationMs: 18 },
     { at: new Date().toISOString(), category: "probe", outcome: "supported", durationMs: 42 },
@@ -118,6 +122,7 @@ async function configure(command: ConfigCommand) {
     current.preferences = {
       launchAtLogin: command.launchAtLogin ?? current.preferences.launchAtLogin,
       onboardingComplete: command.onboardingComplete ?? current.preferences.onboardingComplete,
+      themeMode: command.themeMode ?? current.preferences.themeMode,
     };
   }
   current.observedAtMs = Date.now();

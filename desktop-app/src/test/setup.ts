@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach } from "vitest";
+import { afterEach, vi } from "vitest";
 
 if (!window.PointerEvent) {
   Object.defineProperty(window, "PointerEvent", {
@@ -13,4 +13,7 @@ if (!HTMLElement.prototype.setPointerCapture) {
   HTMLElement.prototype.setPointerCapture = () => undefined;
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});

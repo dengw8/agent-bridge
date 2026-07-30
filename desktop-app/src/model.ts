@@ -109,6 +109,8 @@ export type UsageWindow = {
   resetsAt: number | null;
 };
 
+export type ThemePreference = "system" | "light" | "dark";
+
 export type AppSnapshot = {
   observedAtMs: number;
   bridge: {
@@ -134,6 +136,7 @@ export type AppSnapshot = {
   preferences: {
     launchAtLogin: boolean;
     onboardingComplete: boolean;
+    themeMode: ThemePreference;
   };
   diagnostics: DiagnosticEntry[];
   lastReceipt?: {

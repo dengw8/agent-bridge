@@ -8,6 +8,7 @@ import type {
   Direction,
   EncoderMode,
   InputEvent,
+  ThemePreference,
 } from "../model";
 
 export type ConfigCommand =
@@ -22,6 +23,7 @@ export type ConfigCommand =
       type: "setPreferences";
       launchAtLogin?: boolean;
       onboardingComplete?: boolean;
+      themeMode?: ThemePreference;
     };
 
 export type BridgeCommand =

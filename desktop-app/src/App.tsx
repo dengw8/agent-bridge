@@ -22,6 +22,7 @@ import {
   type ImportPreviewItem,
   type InputPhase,
   type KeycapId,
+  type ThemePreference,
 } from "./model";
 import {
   tauriClient,
@@ -49,6 +50,16 @@ const JOYSTICK_COMMANDS = [
   ["Navigate back", "navigateBack"],
 ] as const;
 
+const THEME_OPTIONS: ReadonlyArray<{
+  value: ThemePreference;
+  label: string;
+  description: string;
+}> = [
+  { value: "system", label: "System", description: "Match macOS" },
+  { value: "light", label: "Light", description: "Warm ivory" },
+  { value: "dark", label: "Dark", description: "Deep cobalt" },
+];
+
 const BRIDGE_COPY: Record<AppSnapshot["bridge"]["state"], string> = {
   chatGptNotRunning: "Waiting for ChatGPT Desktop",
   restartRequired: "Local Bridge needs a confirmed ChatGPT restart",
@@ -70,6 +81,42 @@ const MIC_STATE_LABELS: Record<NonNullable<AppSnapshot["micState"]>, string> = {
   stopping: "Stopping",
   unknown: "Unknown",
 };
+
+function currentSystemTheme(): AppSnapshot["theme"] {
+  if (typeof window.matchMedia !== "function") return "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function useResolvedTheme(preference: ThemePreference): AppSnapshot["theme"] {
+  const [systemTheme, setSystemTheme] = useState(currentSystemTheme);
+  const resolved = preference === "system" ? systemTheme : preference;
+
+  useEffect(() => {
+    if (preference !== "system" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = (event: MediaQueryListEvent | MediaQueryList) => {
+      setSystemTheme(event.matches ? "dark" : "light");
+    };
+    update(query);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, [preference]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolved;
+    return () => {
+      if (document.documentElement.dataset.theme === resolved) {
+        delete document.documentElement.dataset.theme;
+      }
+    };
+  }, [resolved]);
+
+  return resolved;
+}
 
 function bindingLabel(binding: Binding): string {
   if (binding.type === "keycap") {
@@ -575,36 +622,78 @@ function ConfigurePanel({
             </button>
           ))}
         </div>
-        <div className="encoder-setting">
-          <div><strong>Encoder mode</strong><small>Changes are saved immediately.</small></div>
-          <select
-            aria-label="Encoder mode"
-            onChange={(event) => void safeApply({
-              type: "setEncoderMode",
-              mode: event.currentTarget.value as AppSnapshot["layout"]["encoderMode"],
-            })}
-            value={snapshot.layout.encoderMode}
-          >
-            <option value="composer-navigation">Composer Navigation</option>
-            <option value="reasoning">Reasoning Only</option>
-          </select>
+        <div className="settings-utilities">
+          <section className="utility-setting encoder-setting">
+            <div>
+              <strong>Encoder mode</strong>
+              <small>Changes are saved immediately.</small>
+            </div>
+            <select
+              aria-label="Encoder mode"
+              onChange={(event) => void safeApply({
+                type: "setEncoderMode",
+                mode: event.currentTarget.value as AppSnapshot["layout"]["encoderMode"],
+              })}
+              value={snapshot.layout.encoderMode}
+            >
+              <option value="composer-navigation">Composer Navigation</option>
+              <option value="reasoning">Reasoning Only</option>
+            </select>
+          </section>
+          <section className="utility-setting import-setting">
+            <div>
+              <strong>Codex Micro import</strong>
+              <small>Agent slots always stay live and are not overwritten.</small>
+            </div>
+            <div className="import-actions">
+              <button onClick={() => void safeApply({ type: "previewImport" })} type="button">
+                Preview import
+              </button>
+              <button
+                className="danger subtle"
+                onClick={() => setRestoreConfirmationOpen(true)}
+                type="button"
+              >
+                Restore defaults
+              </button>
+            </div>
+          </section>
         </div>
-        <div className="import-actions">
-          <div>
-            <strong>Codex Micro import</strong>
-            <small>Agent slots always stay live and are not overwritten.</small>
+        <fieldset
+          aria-describedby="theme-setting-description"
+          className="appearance-setting"
+        >
+          <legend>Appearance</legend>
+          <small id="theme-setting-description">
+            Uses the Agent Bridge icon palette. Changes apply immediately and
+            are saved for the next launch.
+          </small>
+          <div aria-label="Color theme" className="theme-options" role="radiogroup">
+            {THEME_OPTIONS.map((option) => (
+              <label
+                className={`theme-option theme-option-${option.value}`}
+                key={option.value}
+              >
+                <input
+                  aria-label={option.label}
+                  checked={snapshot.preferences.themeMode === option.value}
+                  name="theme-mode"
+                  onChange={() => void safeApply({
+                    type: "setPreferences",
+                    themeMode: option.value,
+                  })}
+                  type="radio"
+                  value={option.value}
+                />
+                <span aria-hidden="true" className="theme-preview"><i /></span>
+                <span>
+                  <strong>{option.label}</strong>
+                  <small>{option.description}</small>
+                </span>
+              </label>
+            ))}
           </div>
-          <button onClick={() => void safeApply({ type: "previewImport" })} type="button">
-            Preview import
-          </button>
-          <button
-            className="danger subtle"
-            onClick={() => setRestoreConfirmationOpen(true)}
-            type="button"
-          >
-            Restore defaults
-          </button>
-        </div>
+        </fieldset>
         <label className="login-choice settings-login-choice">
           <input
             aria-label="Open Agent Bridge at login"
@@ -837,6 +926,9 @@ export default function App({ client = tauriClient }: { client?: AgentBridgeClie
   const [restartConfirmationOpen, setRestartConfirmationOpen] = useState(false);
   const [restartPending, setRestartPending] = useState(false);
   const sequence = useRef(0);
+  const resolvedTheme = useResolvedTheme(
+    snapshot?.preferences.themeMode ?? "system",
+  );
 
   useEffect(() => {
     let alive = true;
@@ -898,13 +990,24 @@ export default function App({ client = tauriClient }: { client?: AgentBridgeClie
     ["diagnostics", "Diagnostics"],
   ] as const, []);
 
-  if (!snapshot) return <main className="loading"><span /><strong>Starting Agent Bridge…</strong></main>;
+  if (!snapshot) {
+    return (
+      <main className="app-shell loading" data-theme={resolvedTheme}>
+        <span />
+        <strong>Starting Agent Bridge…</strong>
+      </main>
+    );
+  }
   if (!snapshot.preferences.onboardingComplete) {
-    return <Onboarding client={client} onDone={setSnapshot} snapshot={snapshot} />;
+    return (
+      <div className="app-shell" data-theme={resolvedTheme}>
+        <Onboarding client={client} onDone={setSnapshot} snapshot={snapshot} />
+      </div>
+    );
   }
 
   return (
-    <div className="app-shell" data-theme={snapshot.theme}>
+    <div className="app-shell" data-theme={resolvedTheme}>
       <header className="topbar">
         <div><p className="eyebrow">AGENT BRIDGE</p><h1>Codex Controls</h1></div>
         <nav aria-label="Primary navigation">

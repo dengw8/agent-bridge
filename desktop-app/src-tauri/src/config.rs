@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::model::{
     AppConfig, Binding, CommandSlot, Direction, EncoderMode, InitializationSource, Layout,
+    ThemePreference,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +40,8 @@ pub enum ConfigCommand {
         launch_at_login: Option<bool>,
         #[serde(rename = "onboardingComplete")]
         onboarding_complete: Option<bool>,
+        #[serde(rename = "themeMode")]
+        theme_mode: Option<ThemePreference>,
     },
 }
 
@@ -175,12 +178,16 @@ impl ConfigStore {
             ConfigCommand::SetPreferences {
                 launch_at_login,
                 onboarding_complete,
+                theme_mode,
             } => {
                 if let Some(value) = launch_at_login {
                     self.current.preferences.launch_at_login = value;
                 }
                 if let Some(value) = onboarding_complete {
                     self.current.preferences.onboarding_complete = value;
+                }
+                if let Some(value) = theme_mode {
+                    self.current.preferences.theme_mode = value;
                 }
             }
             ConfigCommand::PreviewImport | ConfigCommand::CommitImport { .. } => {
@@ -457,6 +464,7 @@ mod tests {
             .apply(ConfigCommand::SetPreferences {
                 launch_at_login: Some(true),
                 onboarding_complete: Some(true),
+                theme_mode: None,
             })
             .unwrap();
         assert!(store.needs_initialization());
@@ -471,6 +479,38 @@ mod tests {
         assert_eq!(
             store.current().layout.command_slots[&CommandSlot::Act06].label(),
             "TERM"
+        );
+    }
+
+    #[test]
+    fn theme_preference_defaults_for_legacy_config_and_persists() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut legacy = serde_json::to_value(AppConfig::default()).unwrap();
+        legacy["preferences"]
+            .as_object_mut()
+            .unwrap()
+            .remove("themeMode");
+        fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+        let mut store = ConfigStore::load(path.clone()).unwrap();
+        assert_eq!(
+            store.current().preferences.theme_mode,
+            crate::model::ThemePreference::System
+        );
+        store
+            .apply(ConfigCommand::SetPreferences {
+                launch_at_login: None,
+                onboarding_complete: None,
+                theme_mode: Some(crate::model::ThemePreference::Dark),
+            })
+            .unwrap();
+        drop(store);
+
+        let reloaded = ConfigStore::load(path).unwrap();
+        assert_eq!(
+            reloaded.current().preferences.theme_mode,
+            crate::model::ThemePreference::Dark
         );
     }
 

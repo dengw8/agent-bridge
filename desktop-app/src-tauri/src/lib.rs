@@ -521,7 +521,7 @@ mod integration_tests {
     #[test]
     fn frontend_camel_case_commands_deserialize_exactly() {
         let preferences = serde_json::from_str::<ConfigCommand>(
-            r#"{"type":"setPreferences","launchAtLogin":true,"onboardingComplete":true}"#,
+            r#"{"type":"setPreferences","launchAtLogin":true,"onboardingComplete":true,"themeMode":"light"}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -529,6 +529,7 @@ mod integration_tests {
             ConfigCommand::SetPreferences {
                 launch_at_login: Some(true),
                 onboarding_complete: Some(true),
+                theme_mode: Some(crate::model::ThemePreference::Light),
             }
         ));
         assert!(serde_json::from_str::<ConfigCommand>(
@@ -604,6 +605,7 @@ mod integration_tests {
             ConfigCommand::SetPreferences {
                 launch_at_login: Some(true),
                 onboarding_complete: None,
+                theme_mode: None,
             },
             |enabled| {
                 launch_item_changes.push(enabled);

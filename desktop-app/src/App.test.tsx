@@ -63,7 +63,11 @@ function snapshot(): AppSnapshot {
     initializationSource: "codex-micro",
     micState: "idle",
     theme: "dark",
-    preferences: { launchAtLogin: false, onboardingComplete: true },
+    preferences: {
+      launchAtLogin: false,
+      onboardingComplete: true,
+      themeMode: "system",
+    },
     diagnostics: [],
   };
 }
@@ -93,6 +97,9 @@ function fakeClient(value = snapshot()) {
       if (command.onboardingComplete != null) {
         current.preferences.onboardingComplete = command.onboardingComplete;
       }
+      if (command.themeMode != null) {
+        current.preferences.themeMode = command.themeMode;
+      }
     }
     return {
       snapshot: structuredClone(current),
@@ -120,6 +127,35 @@ function fakeClient(value = snapshot()) {
     subscribe: async () => () => undefined,
   };
   return { client, input, configure, bridge, app };
+}
+
+function mockSystemTheme(initialDark: boolean) {
+  let matches = initialDark;
+  const listeners = new Set<(event: MediaQueryListEvent) => void>();
+  const mediaQuery = {
+    get matches() {
+      return matches;
+    },
+    media: "(prefers-color-scheme: dark)",
+    onchange: null,
+    addEventListener: (
+      _type: "change",
+      listener: (event: MediaQueryListEvent) => void,
+    ) => listeners.add(listener),
+    removeEventListener: (
+      _type: "change",
+      listener: (event: MediaQueryListEvent) => void,
+    ) => listeners.delete(listener),
+  };
+  vi.stubGlobal("matchMedia", vi.fn(() => mediaQuery));
+  return (dark: boolean) => {
+    matches = dark;
+    act(() => {
+      for (const listener of listeners) {
+        listener({ matches: dark } as MediaQueryListEvent);
+      }
+    });
+  };
 }
 
 test("renders six native Agent Keys, six command positions, and textual state", async () => {
@@ -232,6 +268,36 @@ test("encoder rotation and joystick movement preserve their native phase semanti
       phase: { type: "centered" },
     },
   ]);
+});
+
+test("appearance settings persist light, dark, and live system themes", async () => {
+  const setSystemDark = mockSystemTheme(true);
+  const { client, configure } = fakeClient();
+
+  render(<App client={client} />);
+  await screen.findByText("Fully compatible");
+  const shell = document.querySelector(".app-shell");
+  expect(shell).toHaveAttribute("data-theme", "dark");
+  expect(screen.queryByRole("radiogroup", { name: "Color theme" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Configure" }));
+  const group = await screen.findByRole("radiogroup", { name: "Color theme" });
+  expect(within(group).getByRole("radio", { name: "System" })).toBeChecked();
+
+  fireEvent.click(within(group).getByRole("radio", { name: "Light" }));
+  await waitFor(() => expect(configure).toHaveBeenCalledWith({
+    type: "setPreferences",
+    themeMode: "light",
+  }));
+  await waitFor(() => expect(shell).toHaveAttribute("data-theme", "light"));
+
+  setSystemDark(false);
+  expect(shell).toHaveAttribute("data-theme", "light");
+
+  fireEvent.click(within(group).getByRole("radio", { name: "System" }));
+  await waitFor(() => expect(shell).toHaveAttribute("data-theme", "light"));
+  setSystemDark(true);
+  expect(shell).toHaveAttribute("data-theme", "dark");
 });
 
 test("Codex Micro import stays a preview until the user commits its revision", async () => {
