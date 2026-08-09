@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1.0",
+  "packets": [
+    { "name": "wrong_magic", "base": "input_event_ag00_pressed", "set": [[0, 0]] },
+    { "name": "wrong_major", "base": "input_event_ag00_pressed", "set": [[1, 2]] },
+    { "name": "unsupported_minor", "base": "input_event_ag00_pressed", "set": [[2, 1]] },
+    { "name": "unknown_type", "base": "input_event_ag00_pressed", "set": [[3, 255]] },
+    { "name": "nonzero_flags", "base": "input_event_ag00_pressed", "set": [[4, 1]] },
+    { "name": "payload_too_large", "base": "input_event_ag00_pressed", "set": [[5, 49]] },
+    { "name": "zero_sequence", "base": "input_event_ag00_pressed", "set": [[6, 0], [7, 0], [8, 0], [9, 0]] },
+    { "name": "noncanonical_padding", "base": "input_event_ag00_pressed", "set": [[61, 1]] },
+    { "name": "nonzero_reserved", "base": "input_event_ag00_pressed", "set": [[62, 1]] },
+    { "name": "device_hello_zero_boot", "base": "device_hello", "set": [[14, 0], [15, 0], [16, 0], [17, 0]] },
+    { "name": "auth_response_zero_hmac", "base": "auth_response", "fill": [[18, 50, 0]] },
+    { "name": "input_event_unknown_control", "base": "input_event_ag00_pressed", "set": [[18, 9]] },
+    { "name": "input_snapshot_invalid_mask", "base": "input_snapshot", "set": [[18, 64]] },
+    { "name": "device_status_invalid_mode", "base": "device_status", "set": [[18, 4]] },
+    { "name": "pong_zero_boot", "base": "pong", "fill": [[14, 18, 0]] },
+    { "name": "ack_zero_acknowledged_sequence", "base": "ack", "fill": [[18, 22, 0]] },
+    { "name": "protocol_error_invalid_code", "base": "protocol_error", "set": [[22, 10]] },
+    { "name": "update_status_nonzero_reserved", "base": "update_status", "set": [[21, 1]] },
+    { "name": "host_hello_zero_nonce", "base": "host_hello", "fill": [[14, 30, 0]] },
+    { "name": "auth_challenge_zero", "base": "auth_challenge", "fill": [[14, 46, 0]] },
+    { "name": "claim_begin_invalid_key_prefix", "base": "claim_begin", "set": [[29, 4]] },
+    { "name": "claim_commit_zero", "base": "claim_commit", "fill": [[14, 46, 0]] },
+    { "name": "get_input_snapshot_nonempty", "base": "get_input_snapshot", "set": [[5, 1], [14, 1]] },
+    { "name": "get_device_status_nonempty", "base": "get_device_status", "set": [[5, 1], [14, 1]] },
+    { "name": "visual_state_invalid_agent", "base": "visual_state", "set": [[18, 6]] },
+    { "name": "set_device_config_invalid_brightness", "base": "set_device_config", "set": [[14, 101]] },
+    { "name": "ping_wrong_length", "base": "ping", "set": [[5, 3], [17, 0]] },
+    { "name": "host_going_away_invalid_reason", "base": "host_going_away", "set": [[14, 4]] },
+    { "name": "update_begin_zero_image_size", "base": "update_begin", "fill": [[14, 18, 0]] },
+    { "name": "update_chunk_zero_data_length", "base": "update_chunk", "set": [[18, 0]] },
+    { "name": "update_commit_zero", "base": "update_commit", "fill": [[14, 46, 0]] }
+  ],
+  "lengthCases": {
+    "base": "input_event_ag00_pressed",
+    "truncationLengths": [0, 62],
+    "oversizedLength": 64
+  }
+}

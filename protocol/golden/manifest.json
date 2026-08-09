@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1.0",
+  "frameSize": 63,
+  "packets": [
+    { "name": "device_hello", "typeId": 1, "sequence": 1, "senderUptimeMs": 10, "payloadHex": "443322110102030405060708090a0b0c0d0e0f1001000100" },
+    { "name": "auth_response", "typeId": 2, "sequence": 2, "senderUptimeMs": 20, "payloadHex": "443322110102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" },
+    { "name": "input_event_ag00_pressed", "typeId": 3, "sequence": 3, "senderUptimeMs": 30, "payloadHex": "443322110000000000" },
+    { "name": "input_snapshot", "typeId": 4, "sequence": 4, "senderUptimeMs": 40, "payloadHex": "4433221101020401" },
+    { "name": "device_status", "typeId": 5, "sequence": 5, "senderUptimeMs": 50, "payloadHex": "44332211005003010200" },
+    { "name": "pong", "typeId": 6, "sequence": 6, "senderUptimeMs": 60, "payloadHex": "44332211ddccbbaa" },
+    { "name": "ack", "typeId": 7, "sequence": 7, "senderUptimeMs": 70, "payloadHex": "443322110300000000" },
+    { "name": "protocol_error", "typeId": 8, "sequence": 8, "senderUptimeMs": 80, "payloadHex": "44332211030000000100" },
+    { "name": "update_status", "typeId": 9, "sequence": 9, "senderUptimeMs": 90, "payloadHex": "4433221102640000" },
+    { "name": "host_hello", "typeId": 64, "sequence": 1, "senderUptimeMs": 100, "payloadHex": "0102030405060708090a0b0c0d0e0f1001000000" },
+    { "name": "auth_challenge", "typeId": 65, "sequence": 2, "senderUptimeMs": 110, "payloadHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" },
+    { "name": "claim_begin", "typeId": 66, "sequence": 3, "senderUptimeMs": 120, "payloadHex": "0102030405060708090a0b0c0d0e0f020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" },
+    { "name": "claim_commit", "typeId": 67, "sequence": 4, "senderUptimeMs": 130, "payloadHex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f" },
+    { "name": "get_input_snapshot", "typeId": 68, "sequence": 5, "senderUptimeMs": 140, "payloadHex": "" },
+    { "name": "get_device_status", "typeId": 69, "sequence": 6, "senderUptimeMs": 150, "payloadHex": "" },
+    { "name": "visual_state", "typeId": 70, "sequence": 7, "senderUptimeMs": 160, "payloadHex": "070000000102030405050101010100500332b400" },
+    { "name": "set_device_config", "typeId": 71, "sequence": 8, "senderUptimeMs": 170, "payloadHex": "32b400000000" },
+    { "name": "ping", "typeId": 72, "sequence": 9, "senderUptimeMs": 180, "payloadHex": "ddccbbaa" },
+    { "name": "host_going_away", "typeId": 73, "sequence": 10, "senderUptimeMs": 190, "payloadHex": "02" },
+    { "name": "update_begin", "typeId": 74, "sequence": 11, "senderUptimeMs": 200, "payloadHex": "001000000100010203010102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202b00" },
+    { "name": "update_chunk", "typeId": 75, "sequence": 12, "senderUptimeMs": 210, "payloadHex": "0000000003aabbcc" },
+    { "name": "update_commit", "typeId": 76, "sequence": 13, "senderUptimeMs": 220, "payloadHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" }
+  ]
+}

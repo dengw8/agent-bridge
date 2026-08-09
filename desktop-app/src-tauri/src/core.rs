@@ -7,9 +7,10 @@ use crate::{
     config::{ConfigCommand, ConfigStore, ImportPreviewItem},
     control::ControlEngine,
     diagnostics::Diagnostics,
+    input::InputCoordinator,
     model::{
-        now_ms, AppSnapshot, BridgeState, BridgeSummary, DispatchOutcome, DispatchReceipt,
-        InputEvent, Intent,
+        now_ms, AppSnapshot, BridgeState, BridgeSummary, DispatchOutcome, DispatchReceipt, Intent,
+        VirtualInputEvent,
     },
 };
 
@@ -55,6 +56,7 @@ pub struct AppCommandResult {
 pub struct AppCore {
     config: ConfigStore,
     adapter: CodexDesktopAdapter,
+    inputs: InputCoordinator,
     controls: ControlEngine,
     diagnostics: Diagnostics,
     snapshot: AppSnapshot,
@@ -68,6 +70,7 @@ impl AppCore {
         Ok(Self {
             config,
             adapter: CodexDesktopAdapter::new(app_data.join("bridge-state.json")),
+            inputs: InputCoordinator::default(),
             controls: ControlEngine::default(),
             diagnostics: Diagnostics::default(),
             snapshot,
@@ -105,6 +108,7 @@ impl AppCore {
         let previous = self.snapshot.clone();
         self.adapter = adapter.clone();
         if control_reset_required {
+            self.inputs.clear_all();
             self.controls.clear_pressed();
         }
         match renderer {
@@ -145,6 +149,7 @@ impl AppCore {
                 self.sync_config_fields();
             }
             Err(_) => {
+                self.inputs.clear_all();
                 self.controls.clear_pressed();
                 let had_live_snapshot = matches!(
                     previous.bridge.state,
@@ -171,6 +176,7 @@ impl AppCore {
 
     pub fn begin_bridge(&mut self, command: &BridgeCommand) -> AppSnapshot {
         let previous = self.snapshot.clone();
+        self.inputs.clear_all();
         self.controls.clear_pressed();
         self.snapshot.bridge.state = match command {
             BridgeCommand::Restart { .. } => BridgeState::Restarting,
@@ -196,6 +202,7 @@ impl AppCore {
 
     pub fn fail_bridge(&mut self, message: String) -> AppSnapshot {
         let previous = self.snapshot.clone();
+        self.inputs.clear_all();
         self.controls.clear_pressed();
         self.snapshot.bridge.state = BridgeState::Disconnected;
         self.snapshot.bridge.message = message;
@@ -212,19 +219,28 @@ impl AppCore {
         self.snapshot.diagnostics = self.diagnostics.recent();
     }
 
-    pub fn prepare_input(&mut self, event: InputEvent) -> Result<Vec<Intent>, String> {
+    pub fn prepare_input(&mut self, event: VirtualInputEvent) -> Result<Vec<Intent>, String> {
         if !matches!(
             self.snapshot.bridge.state,
             BridgeState::Ready | BridgeState::Degraded
         ) {
+            self.inputs.clear_all();
             self.controls.clear_pressed();
             self.diagnostics
                 .record("dispatch", "unavailable", None, Some("bridge_unavailable"));
             self.snapshot.diagnostics = self.diagnostics.recent();
             return Err("bridge_unavailable".into());
         }
-        self.controls
-            .handle(event, &self.config.current().layout, &self.snapshot.agents)
+        let events = self.inputs.handle_virtual(event)?;
+        let mut intents = Vec::new();
+        for event in events {
+            intents.extend(self.controls.handle(
+                event,
+                &self.config.current().layout,
+                &self.snapshot.agents,
+            )?);
+        }
+        Ok(intents)
     }
 
     pub fn complete_input(
@@ -261,6 +277,7 @@ impl AppCore {
             receipt.outcome,
             DispatchOutcome::Unavailable | DispatchOutcome::Failed
         ) {
+            self.inputs.clear_all();
             self.controls
                 .reset(&self.config.current().layout, &self.snapshot.agents)
         } else {
@@ -367,6 +384,7 @@ impl AppCore {
     }
 
     async fn release_controls(&mut self) {
+        self.inputs.clear_all();
         let releases = self
             .controls
             .reset(&self.config.current().layout, &self.snapshot.agents);
@@ -388,7 +406,8 @@ fn result_snapshot(snapshot: AppSnapshot) -> AppCommandResult {
 mod tests {
     use super::*;
     use crate::model::{
-        BridgeSummary, CommandSlot, ControlId, DispatchOutcome, InputPhase, InputSource, ThemeMode,
+        BridgeSummary, CommandSlot, ControlId, DispatchOutcome, InputPhase, ThemeMode,
+        VirtualInputEvent, VirtualInputSource,
     };
     use std::{sync::Arc, time::Duration};
     use tokio::sync::{Mutex, Notify};
@@ -457,8 +476,8 @@ mod tests {
 
         let receipt = crate::dispatch_prepared_input(
             &core,
-            InputEvent {
-                source: InputSource::VirtualUi,
+            VirtualInputEvent {
+                source: VirtualInputSource::VirtualUi,
                 control: ControlId::Command {
                     slot: CommandSlot::Act06,
                 },
@@ -504,8 +523,8 @@ mod tests {
                 crate::dispatch_ordered_input(
                     &core,
                     &input_gate,
-                    InputEvent {
-                        source: InputSource::VirtualUi,
+                    VirtualInputEvent {
+                        source: VirtualInputSource::VirtualUi,
                         control: ControlId::Command {
                             slot: CommandSlot::Act06,
                         },
@@ -544,8 +563,8 @@ mod tests {
                 crate::dispatch_ordered_input(
                     &core,
                     &input_gate,
-                    InputEvent {
-                        source: InputSource::VirtualUi,
+                    VirtualInputEvent {
+                        source: VirtualInputSource::VirtualUi,
                         control: ControlId::Command {
                             slot: CommandSlot::Act07,
                         },
@@ -619,8 +638,8 @@ mod tests {
         assert_eq!(intermediate.bridge.state, BridgeState::Connecting);
         assert!(!intermediate.bridge.fully_compatible);
         assert!(core
-            .prepare_input(InputEvent {
-                source: InputSource::VirtualUi,
+            .prepare_input(VirtualInputEvent {
+                source: VirtualInputSource::VirtualUi,
                 control: ControlId::Command {
                     slot: CommandSlot::Act06,
                 },

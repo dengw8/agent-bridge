@@ -484,9 +484,32 @@ impl AppSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputSource {
+    VirtualUi,
+    Hardware(TrustedHardwareSource),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TrustedHardwareSource {
+    pub(crate) id: u64,
+    pub(crate) transport: HardwareTransport,
+    pub(crate) generation: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HardwareTransport {
+    Fake,
+    Usb,
+    Ble,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VirtualInputSource {
     VirtualUi,
 }
 
@@ -511,14 +534,35 @@ pub enum InputPhase {
     Rotated { steps: i16 },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputEvent {
     pub source: InputSource,
     pub control: ControlId,
     pub phase: InputPhase,
     pub sequence: u64,
     pub monotonic_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VirtualInputEvent {
+    pub source: VirtualInputSource,
+    pub control: ControlId,
+    pub phase: InputPhase,
+    pub sequence: u64,
+    pub monotonic_ms: f64,
+}
+
+impl From<VirtualInputEvent> for InputEvent {
+    fn from(event: VirtualInputEvent) -> Self {
+        Self {
+            source: InputSource::VirtualUi,
+            control: event.control,
+            phase: event.phase,
+            sequence: event.sequence,
+            monotonic_ms: event.monotonic_ms,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3,14 +3,18 @@ mod config;
 mod control;
 mod core;
 mod diagnostics;
+#[cfg(test)]
+mod hardware;
+mod input;
 mod model;
+pub mod protocol;
 
 use std::{fs, future::Future, process::Command, sync::Arc, time::Duration};
 
 use adapter::{CodexDesktopAdapter, RendererSnapshot};
 use config::ConfigCommand;
 use core::{AppCommand, AppCommandResult, AppCore, BridgeCommand, ConfigResult};
-use model::{AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, InputEvent, Intent};
+use model::{AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, Intent, VirtualInputEvent};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -36,7 +40,7 @@ pub(crate) struct PollCycle {
 
 pub(crate) async fn dispatch_prepared_input<Dispatch, DispatchFuture>(
     core: &Arc<Mutex<AppCore>>,
-    event: InputEvent,
+    event: VirtualInputEvent,
     mut dispatch: Dispatch,
 ) -> Result<DispatchReceipt, String>
 where
@@ -64,7 +68,7 @@ where
 async fn dispatch_ordered_input<Dispatch, DispatchFuture>(
     core: &Arc<Mutex<AppCore>>,
     input_gate: &Arc<Mutex<()>>,
-    event: InputEvent,
+    event: VirtualInputEvent,
     dispatch: Dispatch,
 ) -> Result<DispatchReceipt, String>
 where
@@ -209,7 +213,10 @@ async fn snapshot(state: State<'_, CoreState>) -> Result<AppSnapshot, String> {
 }
 
 #[tauri::command]
-async fn input(state: State<'_, CoreState>, event: InputEvent) -> Result<DispatchReceipt, String> {
+async fn input(
+    state: State<'_, CoreState>,
+    event: VirtualInputEvent,
+) -> Result<DispatchReceipt, String> {
     let adapter = state.control_adapter.clone();
     dispatch_ordered_input(&state.core, &state.input_gate, event, move |intent| {
         let adapter = adapter.clone();
@@ -494,7 +501,7 @@ mod integration_tests {
     use crate::{
         config::{ConfigCommand, ImportPreviewItem},
         core::{AppCommand, BridgeCommand},
-        model::InputEvent,
+        model::VirtualInputEvent,
     };
 
     #[test]
@@ -543,10 +550,17 @@ mod integration_tests {
             r#"{"type":"quitAndRestartNormal","confirmed":false}"#
         )
         .is_ok());
-        assert!(serde_json::from_str::<InputEvent>(
+        assert!(serde_json::from_str::<VirtualInputEvent>(
             r#"{"source":"virtualUi","control":{"type":"encoderRotate"},"phase":{"type":"rotated","steps":-1},"sequence":4,"monotonicMs":12.5}"#
         )
         .is_ok());
+        for forged in [
+            r#"{"source":"usb","control":{"type":"agent","slot":0},"phase":{"type":"pressed"},"sequence":1,"monotonicMs":1}"#,
+            r#"{"source":{"usb":{"deviceId":"forged","generation":1}},"control":{"type":"agent","slot":0},"phase":{"type":"pressed"},"sequence":1,"monotonicMs":1}"#,
+            r#"{"source":"ble","control":{"type":"agent","slot":0},"phase":{"type":"pressed"},"sequence":1,"monotonicMs":1}"#,
+        ] {
+            assert!(serde_json::from_str::<VirtualInputEvent>(forged).is_err());
+        }
     }
 
     #[test]
