@@ -7,10 +7,13 @@ use crate::{
     config::{ConfigCommand, ConfigStore, ImportPreviewItem},
     control::ControlEngine,
     diagnostics::Diagnostics,
+    hardware::{
+        ConnectionToken, HardwareController, HardwareVisualState, SessionRejection, TransportWrite,
+    },
     input::InputCoordinator,
     model::{
-        now_ms, AppSnapshot, BridgeState, BridgeSummary, DispatchOutcome, DispatchReceipt, Intent,
-        VirtualInputEvent,
+        now_ms, AppSnapshot, BridgeState, BridgeSummary, DispatchOutcome, DispatchReceipt,
+        HardwareConnectionState, HardwareTransport, InputEvent, Intent, VirtualInputEvent,
     },
 };
 
@@ -57,10 +60,20 @@ pub struct AppCore {
     config: ConfigStore,
     adapter: CodexDesktopAdapter,
     inputs: InputCoordinator,
+    hardware: HardwareController,
+    hardware_visual_revision: u32,
     controls: ControlEngine,
     diagnostics: Diagnostics,
     snapshot: AppSnapshot,
     export_directory: PathBuf,
+}
+
+pub(crate) struct HardwarePreparation {
+    pub(crate) intents: Vec<Intent>,
+    pub(crate) outbound: Vec<[u8; crate::protocol::FRAME_SIZE]>,
+    pub(crate) normalized_edges: usize,
+    pub(crate) rejection: Option<SessionRejection>,
+    pub(crate) ready: bool,
 }
 
 impl AppCore {
@@ -71,6 +84,8 @@ impl AppCore {
             config,
             adapter: CodexDesktopAdapter::new(app_data.join("bridge-state.json")),
             inputs: InputCoordinator::default(),
+            hardware: HardwareController::default(),
+            hardware_visual_revision: 0,
             controls: ControlEngine::default(),
             diagnostics: Diagnostics::default(),
             snapshot,
@@ -80,6 +95,13 @@ impl AppCore {
 
     pub fn snapshot(&self) -> AppSnapshot {
         self.snapshot.clone()
+    }
+
+    pub(crate) fn enable_hardware_fake_renderer(&mut self) {
+        self.snapshot.bridge.state = BridgeState::Degraded;
+        self.snapshot.bridge.message =
+            "Hardware validation mode is active; Codex actions are disabled.".into();
+        self.snapshot.bridge.fully_compatible = false;
     }
 
     pub fn adapter_clone(&self) -> CodexDesktopAdapter {
@@ -224,7 +246,6 @@ impl AppCore {
             self.snapshot.bridge.state,
             BridgeState::Ready | BridgeState::Degraded
         ) {
-            self.inputs.clear_all();
             self.controls.clear_pressed();
             self.diagnostics
                 .record("dispatch", "unavailable", None, Some("bridge_unavailable"));
@@ -232,6 +253,74 @@ impl AppCore {
             return Err("bridge_unavailable".into());
         }
         let events = self.inputs.handle_virtual(event)?;
+        self.intents_for_events(events)
+    }
+
+    pub(crate) fn attach_hardware(&mut self) -> ConnectionToken {
+        self.hardware
+            .attach(HardwareTransport::Usb, &mut self.inputs)
+    }
+
+    pub(crate) fn set_hardware_connection(
+        &mut self,
+        state: HardwareConnectionState,
+    ) -> AppSnapshot {
+        let previous = self.snapshot.clone();
+        self.snapshot.hardware_connection = state;
+        self.finish_change(previous);
+        self.snapshot()
+    }
+
+    pub(crate) fn prepare_hardware_report(
+        &mut self,
+        connection: ConnectionToken,
+        report: &[u8],
+    ) -> Result<HardwarePreparation, String> {
+        let outcome = self
+            .hardware
+            .receive_usb(connection, report, &mut self.inputs);
+        let normalized_edges = outcome.events.len();
+        let intents = self.intents_for_events(outcome.events)?;
+        Ok(HardwarePreparation {
+            intents,
+            outbound: outcome.outbound,
+            normalized_edges,
+            rejection: outcome.rejection,
+            ready: self.hardware.is_ready(connection),
+        })
+    }
+
+    pub(crate) fn disconnect_hardware(
+        &mut self,
+        connection: ConnectionToken,
+    ) -> Result<Vec<Intent>, String> {
+        let events = self.hardware.disconnect(connection, &mut self.inputs);
+        self.intents_for_events(events)
+    }
+
+    pub(crate) fn hardware_visual_writes(&mut self) -> Vec<TransportWrite> {
+        self.hardware_visual_revision = self.hardware_visual_revision.wrapping_add(1);
+        let visual =
+            HardwareVisualState::from_app_snapshot(&self.snapshot, self.hardware_visual_revision);
+        self.hardware.publish_visual_state(visual)
+    }
+
+    fn intents_for_events(&mut self, events: Vec<InputEvent>) -> Result<Vec<Intent>, String> {
+        if !matches!(
+            self.snapshot.bridge.state,
+            BridgeState::Ready | BridgeState::Degraded
+        ) {
+            if !events.is_empty() {
+                self.diagnostics.record(
+                    "hardware-dispatch",
+                    "unavailable",
+                    None,
+                    Some("bridge_unavailable"),
+                );
+                self.snapshot.diagnostics = self.diagnostics.recent();
+            }
+            return Ok(Vec::new());
+        }
         let mut intents = Vec::new();
         for event in events {
             intents.extend(self.controls.handle(
@@ -423,6 +512,133 @@ mod tests {
         let serialized = serde_json::to_string(&snapshot).unwrap();
         assert!(!serialized.contains("rawCdp"));
         assert!(!serialized.contains("composerBody"));
+    }
+
+    #[test]
+    fn hardware_fake_renderer_uses_a_safe_dispatchable_bridge_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = AppCore::load(directory.path()).unwrap();
+
+        core.enable_hardware_fake_renderer();
+
+        let snapshot = core.snapshot();
+        assert_eq!(snapshot.bridge.state, BridgeState::Degraded);
+        assert!(!snapshot.bridge.fully_compatible);
+        assert!(snapshot
+            .bridge
+            .message
+            .contains("Codex actions are disabled"));
+    }
+
+    #[test]
+    fn usb_ag00_uses_control_engine_and_unplug_preserves_virtual_input() {
+        use crate::protocol::{
+            Direction as ProtocolDirection, Frame, MessageType, WireControlKind, WireInputEvent,
+            WireInputSnapshot, WirePhase,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = AppCore::load(directory.path()).unwrap();
+        core.snapshot.bridge.state = BridgeState::Ready;
+        let connection = core.attach_hardware();
+
+        let mut hello = [0u8; 24];
+        hello[0..4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        hello[4..20].fill(0x41);
+        hello[20..22].copy_from_slice(&1u16.to_le_bytes());
+        hello[22] = 1;
+        let hello = Frame::new(MessageType::DeviceHello, 1, 10, &hello)
+            .unwrap()
+            .encode_usb(ProtocolDirection::DeviceToHost)
+            .unwrap();
+        let hello = core.prepare_hardware_report(connection, &hello).unwrap();
+        assert!(hello.intents.is_empty());
+        assert_eq!(hello.outbound.len(), 1);
+        assert_eq!(
+            Frame::decode(&hello.outbound[0]).unwrap().message_type,
+            MessageType::GetInputSnapshot
+        );
+
+        let snapshot = WireInputSnapshot {
+            boot_id: 0x1122_3344,
+            agent_mask: 0,
+            action_mask: 0,
+            joystick_mask: 0,
+            encoder_pressed: false,
+        }
+        .encode()
+        .unwrap();
+        let snapshot = Frame::new(MessageType::InputSnapshot, 2, 11, &snapshot)
+            .unwrap()
+            .encode_usb(ProtocolDirection::DeviceToHost)
+            .unwrap();
+        assert!(core
+            .prepare_hardware_report(connection, &snapshot)
+            .unwrap()
+            .intents
+            .is_empty());
+
+        let pressed = WireInputEvent {
+            boot_id: 0x1122_3344,
+            control_kind: WireControlKind::Agent,
+            control_id: 0,
+            phase: WirePhase::Pressed,
+            value: 0,
+        }
+        .encode()
+        .unwrap();
+        let pressed = Frame::new(MessageType::InputEvent, 3, 20, &pressed)
+            .unwrap()
+            .encode_usb(ProtocolDirection::DeviceToHost)
+            .unwrap();
+        let press = core.prepare_hardware_report(connection, &pressed).unwrap();
+        assert_eq!(press.normalized_edges, 1);
+        assert!(matches!(
+            press.intents.as_slice(),
+            [Intent::AgentEdge {
+                slot: 0,
+                pressed: true,
+                ..
+            }]
+        ));
+        let fake_receipt = DispatchReceipt {
+            request_id: "fake-usb-1".into(),
+            intent_kind: "agentEdge".into(),
+            outcome: DispatchOutcome::Executed,
+            duration_ms: 0,
+            capability: Some("fakeRenderer".into()),
+            error_code: None,
+        };
+        let (receipt, _) = core.complete_input(vec![fake_receipt]);
+        assert_eq!(receipt.request_id, "fake-usb-1");
+
+        let unplug_release = core.disconnect_hardware(connection).unwrap();
+        assert!(matches!(
+            unplug_release.as_slice(),
+            [Intent::AgentEdge {
+                slot: 0,
+                pressed: false,
+                ..
+            }]
+        ));
+
+        let virtual_press = core
+            .prepare_input(VirtualInputEvent {
+                source: VirtualInputSource::VirtualUi,
+                control: ControlId::Agent { slot: 0 },
+                phase: InputPhase::Pressed,
+                sequence: 1,
+                monotonic_ms: 30.0,
+            })
+            .unwrap();
+        assert!(matches!(
+            virtual_press.as_slice(),
+            [Intent::AgentEdge {
+                slot: 0,
+                pressed: true,
+                ..
+            }]
+        ));
     }
 
     #[test]

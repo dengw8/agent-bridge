@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "A private macOS controller for the current ChatGPT Desktop Codex UI"
 authors = ["Agent Bridge contributors"]
 edition = "2021"
+default-run = "agent-bridge"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -30,6 +31,9 @@ tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.27", features = ["rustls-tls-native-roots"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+hidapi = { version = "=2.6.6", features = ["macos-shared-device"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -10,9 +10,9 @@ use crate::{
         HardwareTransport, InputEvent, InputPhase, MicState, TrustedHardwareSource,
     },
     protocol::{
-        AgentVisualState, Frame, MessageType, ProtocolError, VisualBridgeState,
-        VisualConnectionState, VisualMicState, VisualProfile, VisualState, WireControlKind,
-        WireInputEvent, WireInputSnapshot, WirePhase, FRAME_SIZE,
+        AgentVisualState, Direction as ProtocolDirection, Frame, MessageType, ProtocolError,
+        VisualBridgeState, VisualConnectionState, VisualMicState, VisualProfile, VisualState,
+        WireControlKind, WireInputEvent, WireInputSnapshot, WirePhase, FRAME_SIZE, USB_REPORT_SIZE,
     },
 };
 
@@ -267,6 +267,12 @@ pub(crate) struct HardwareController {
 }
 
 impl HardwareController {
+    pub(crate) fn is_ready(&self, connection: ConnectionToken) -> bool {
+        self.sessions
+            .get(&connection)
+            .is_some_and(|connected| connected.session.is_ready())
+    }
+
     pub(crate) fn attach(
         &mut self,
         transport: HardwareTransport,
@@ -415,6 +421,24 @@ impl HardwareController {
         }
     }
 
+    pub(crate) fn receive_usb(
+        &mut self,
+        connection: ConnectionToken,
+        report: &[u8],
+        inputs: &mut InputCoordinator,
+    ) -> ControllerOutcome {
+        let frame = match Frame::decode_usb(report, ProtocolDirection::DeviceToHost) {
+            Ok(frame) => frame,
+            Err(_) => {
+                return ControllerOutcome {
+                    rejection: Some(SessionRejection::Malformed),
+                    ..ControllerOutcome::default()
+                };
+            }
+        };
+        self.receive(connection, &frame.encode(), inputs)
+    }
+
     pub(crate) fn disconnect(
         &mut self,
         connection: ConnectionToken,
@@ -457,6 +481,12 @@ impl HardwareController {
 pub(crate) struct TransportWrite {
     pub(crate) connection: ConnectionToken,
     pub(crate) bytes: [u8; FRAME_SIZE],
+}
+
+impl TransportWrite {
+    pub(crate) fn usb_report(self) -> Result<[u8; USB_REPORT_SIZE], ProtocolError> {
+        Frame::decode(&self.bytes)?.encode_usb(ProtocolDirection::HostToDevice)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -505,17 +535,10 @@ impl HardwareVisualState {
                     MicState::Unknown => VisualMicState::Unknown,
                 },
                 bridge,
-                connection: if matches!(
-                    snapshot.bridge.state,
-                    BridgeState::Ready | BridgeState::Degraded
-                ) {
-                    VisualConnectionState::Ready
-                } else {
-                    VisualConnectionState::Offline
-                },
+                connection: VisualConnectionState::Ready,
                 profile: VisualProfile::Usb,
                 battery_percent: 255,
-                power_flags: 0,
+                power_flags: 0x02,
                 brightness_percent: 50,
                 auto_dim_seconds: 180,
             },
@@ -870,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn every_ag00_visual_state_maps_to_the_closed_wire_enum() {
+    fn every_i02_ag00_visual_state_maps_to_the_closed_wire_enum() {
         for (app_status, expected) in [
             (AgentVisualStatus::Empty, AgentVisualState::Empty),
             (AgentVisualStatus::Idle, AgentVisualState::Idle),

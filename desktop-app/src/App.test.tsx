@@ -18,6 +18,7 @@ function snapshot(): AppSnapshot {
       codexVersion: "26.721.81911",
       fullyCompatible: true,
     },
+    hardwareConnection: "available",
     capabilities: [
       ...[
         "snapshot",

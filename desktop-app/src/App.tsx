@@ -72,6 +72,15 @@ const BRIDGE_COPY: Record<AppSnapshot["bridge"]["state"], string> = {
   restarting: "Restarting ChatGPT with the local Bridge",
 };
 
+const HARDWARE_COPY: Record<AppSnapshot["hardwareConnection"], string> = {
+  disconnected: "Not connected",
+  connecting: "Connected · awaiting ABP handshake",
+  permissionDenied: "Permission denied",
+  incompatible: "Protocol incompatible",
+  available: "Vendor HID available",
+  unavailable: "USB adapter unavailable",
+};
+
 const MIC_STATE_LABELS: Record<NonNullable<AppSnapshot["micState"]>, string> = {
   idle: "Idle",
   recording: "Recording",
@@ -888,6 +897,11 @@ function DiagnosticsPanel({
           </span>
         </div>
         <div className="capability-list">
+          <div>
+            <i className={snapshot.hardwareConnection === "available" ? "cap-supported" : "cap-limited"} />
+            <span><strong>H0 hardware</strong><small>USB Vendor HID · {HARDWARE_COPY[snapshot.hardwareConnection]}</small></span>
+            <em>{snapshot.hardwareConnection}</em>
+          </div>
           {snapshot.capabilities.map((capability) => (
             <div key={capability.id}>
               <i className={`cap-${capability.status}`} />

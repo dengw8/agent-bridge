@@ -64,6 +64,28 @@ It requires a running ChatGPT Desktop that already has loopback CDP enabled and
 does not dispatch any UI action. On the validated build, Diagnostics shows 38
 required native capabilities plus the optional Usage capability.
 
+## Hardware development
+
+The frozen USB/BLE scope, electronics, firmware, protocol, mechanical design,
+delivery phases, and physical-validation responsibilities are defined in the
+[hardware technical design](../docs/AGENT_BRIDGE_HARDWARE_TECHNICAL_DESIGN.md).
+The older
+[USB-only hardware/software interface draft](../docs/HARDWARE_SOFTWARE_INTERFACE.md)
+is retained as superseded historical context. The H0 runtime opens only the
+exact development VID/PID/Usage tuple through macOS IOHIDManager, keeps raw
+handles and reports in Rust, and exposes only a content-free hardware status to
+the WebView. The Diagnostics page distinguishes disconnected, permission
+denied, protocol incompatible, unavailable, and ready states.
+
+With the I02 firmware attached, the following helpers validate the frozen HID
+descriptor and replay content-free VisualState values:
+
+```zsh
+cd src-tauri
+cargo run --locked --bin h0-usb-evidence -- /path/to/new/evidence-directory
+cargo run --locked --bin h0-visual-replay
+```
+
 ## Security boundary
 
 Renderer scripts are bundled resources selected by typed Rust commands.

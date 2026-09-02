@@ -3,33 +3,51 @@ mod config;
 mod control;
 mod core;
 mod diagnostics;
-#[cfg(test)]
 mod hardware;
 mod input;
 mod model;
 pub mod protocol;
+mod usb_hid;
 
 use std::{fs, future::Future, process::Command, sync::Arc, time::Duration};
 
 use adapter::{CodexDesktopAdapter, RendererSnapshot};
 use config::ConfigCommand;
 use core::{AppCommand, AppCommandResult, AppCore, BridgeCommand, ConfigResult};
-use model::{AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, Intent, VirtualInputEvent};
+use hardware::ConnectionToken;
+use model::{
+    AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, HardwareConnectionState, Intent,
+    VirtualInputEvent,
+};
+use protocol::{Direction as ProtocolDirection, Frame, MessageType, ProtocolError};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
     AppHandle, Emitter, Manager, State, WindowEvent,
 };
 use tokio::sync::Mutex;
+use usb_hid::{UsbRuntimeEvent, UsbRuntimeHandle};
 
 struct CoreState {
     core: Arc<Mutex<AppCore>>,
     control_adapter: Arc<Mutex<CodexDesktopAdapter>>,
     input_gate: Arc<Mutex<()>>,
     bridge_gate: Arc<Mutex<()>>,
+    usb_runtime: UsbRuntimeHandle,
+    active_usb: Arc<Mutex<Option<ActiveUsbConnection>>>,
+    hardware_fake_renderer: bool,
 }
 
 struct TrayStatus(MenuItem<tauri::Wry>);
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveUsbConnection {
+    runtime_generation: u64,
+    controller_token: ConnectionToken,
+    device_clock_offset_ms: Option<f64>,
+    host_edge_count: u64,
+    receipt_count: u64,
+}
 
 pub(crate) struct PollCycle {
     adapter: CodexDesktopAdapter,
@@ -77,6 +95,289 @@ where
 {
     let _ordered = input_gate.lock().await;
     dispatch_prepared_input(core, event, dispatch).await
+}
+
+async fn dispatch_hardware_intents(
+    core: &Arc<Mutex<AppCore>>,
+    control_adapter: &Arc<Mutex<CodexDesktopAdapter>>,
+    intents: Vec<Intent>,
+    fake_renderer: bool,
+) -> Option<AppSnapshot> {
+    if intents.is_empty() {
+        return None;
+    }
+    let mut receipts = Vec::with_capacity(intents.len());
+    for intent in intents {
+        receipts.push(if fake_renderer {
+            DispatchReceipt {
+                request_id: format!("h0-fake-{}", uuid::Uuid::new_v4()),
+                intent_kind: intent.kind().into(),
+                outcome: model::DispatchOutcome::Executed,
+                duration_ms: 0,
+                capability: Some("h0FakeRenderer".into()),
+                error_code: None,
+            }
+        } else {
+            control_adapter.lock().await.dispatch(&intent).await
+        });
+    }
+    let (receipt, releases, snapshot) = {
+        let mut core = core.lock().await;
+        let (receipt, releases) = core.complete_input(receipts);
+        (receipt, releases, core.snapshot())
+    };
+    for release in releases {
+        let _ = control_adapter.lock().await.dispatch(&release).await;
+    }
+    let _ = receipt;
+    Some(snapshot)
+}
+
+fn send_session_frames(
+    runtime: &UsbRuntimeHandle,
+    runtime_generation: u64,
+    frames: impl IntoIterator<Item = [u8; protocol::FRAME_SIZE]>,
+) {
+    for bytes in frames {
+        let report = Frame::decode(&bytes)
+            .and_then(|frame| frame.encode_usb(ProtocolDirection::HostToDevice));
+        match report {
+            Ok(report) => {
+                if let Err(error) = runtime.try_write(runtime_generation, report) {
+                    eprintln!("Agent Bridge H0 USB output rejected: {error}");
+                }
+            }
+            Err(_) => eprintln!("Agent Bridge H0 refused an invalid session output frame"),
+        }
+    }
+}
+
+async fn publish_hardware_visual(
+    core: &Arc<Mutex<AppCore>>,
+    runtime: &UsbRuntimeHandle,
+    active_usb: &Arc<Mutex<Option<ActiveUsbConnection>>>,
+) {
+    let Some(active) = *active_usb.lock().await else {
+        return;
+    };
+    let writes = core.lock().await.hardware_visual_writes();
+    for write in writes {
+        if write.connection != active.controller_token {
+            continue;
+        }
+        match write.usb_report() {
+            Ok(report) => {
+                if let Err(error) = runtime.try_write(active.runtime_generation, report) {
+                    eprintln!("Agent Bridge H0 visual output rejected: {error}");
+                }
+            }
+            Err(_) => eprintln!("Agent Bridge H0 refused an invalid visual output frame"),
+        }
+    }
+}
+
+async fn run_usb_events(
+    handle: AppHandle,
+    runtime: UsbRuntimeHandle,
+    mut events: tokio::sync::mpsc::Receiver<UsbRuntimeEvent>,
+    active_usb: Arc<Mutex<Option<ActiveUsbConnection>>>,
+) {
+    while let Some(event) = events.recv().await {
+        let state = handle.state::<CoreState>();
+        match event {
+            UsbRuntimeEvent::Connected { generation } => {
+                let previous = active_usb.lock().await.take();
+                if let Some(previous) = previous {
+                    let _ordered = state.input_gate.lock().await;
+                    let intents = state
+                        .core
+                        .lock()
+                        .await
+                        .disconnect_hardware(previous.controller_token)
+                        .unwrap_or_default();
+                    let _ = dispatch_hardware_intents(
+                        &state.core,
+                        &state.control_adapter,
+                        intents,
+                        state.hardware_fake_renderer,
+                    )
+                    .await;
+                }
+                let token = state.core.lock().await.attach_hardware();
+                let snapshot = state
+                    .core
+                    .lock()
+                    .await
+                    .set_hardware_connection(HardwareConnectionState::Connecting);
+                let _ = handle.emit("state_changed", snapshot);
+                *active_usb.lock().await = Some(ActiveUsbConnection {
+                    runtime_generation: generation,
+                    controller_token: token,
+                    device_clock_offset_ms: None,
+                    host_edge_count: 0,
+                    receipt_count: 0,
+                });
+                eprintln!("Agent Bridge H0 Vendor HID connected generation={generation}");
+            }
+            UsbRuntimeEvent::Report {
+                generation,
+                bytes,
+                received_monotonic_ms,
+            } => {
+                let frame = Frame::decode_usb(&bytes, ProtocolDirection::DeviceToHost);
+                if matches!(frame, Err(ProtocolError::UnsupportedVersion(_, _))) {
+                    let snapshot = state
+                        .core
+                        .lock()
+                        .await
+                        .set_hardware_connection(HardwareConnectionState::Incompatible);
+                    let _ = handle.emit("state_changed", snapshot);
+                    continue;
+                }
+                let token = {
+                    let mut active = active_usb.lock().await;
+                    let Some(active) = active.as_mut() else {
+                        continue;
+                    };
+                    if active.runtime_generation != generation {
+                        continue;
+                    }
+                    if let Ok(frame) = &frame {
+                        if frame.message_type == MessageType::DeviceHello {
+                            active.device_clock_offset_ms =
+                                Some(received_monotonic_ms - f64::from(frame.sender_uptime_ms));
+                        } else if frame.message_type == MessageType::InputEvent {
+                            active.host_edge_count += 1;
+                            let transport_ms = active.device_clock_offset_ms.map(|offset| {
+                                (received_monotonic_ms - offset - f64::from(frame.sender_uptime_ms))
+                                    .max(0.0)
+                            });
+                            eprintln!(
+                                "Agent Bridge H0 input generation={} sequence={} host_count={} transport_estimate_ms={}",
+                                generation,
+                                frame.sequence,
+                                active.host_edge_count,
+                                transport_ms
+                                    .map(|value| format!("{value:.3}"))
+                                    .unwrap_or_else(|| "unavailable".into())
+                            );
+                        }
+                    }
+                    active.controller_token
+                };
+
+                let _ordered = state.input_gate.lock().await;
+                let preparation = match state
+                    .core
+                    .lock()
+                    .await
+                    .prepare_hardware_report(token, &bytes)
+                {
+                    Ok(preparation) => preparation,
+                    Err(error) => {
+                        eprintln!("Agent Bridge H0 input failed closed: {error}");
+                        continue;
+                    }
+                };
+                send_session_frames(&runtime, generation, preparation.outbound);
+                if let Some(rejection) = preparation.rejection {
+                    eprintln!("Agent Bridge H0 session rejected frame: {rejection:?}");
+                }
+                let had_intents = !preparation.intents.is_empty();
+                let snapshot = dispatch_hardware_intents(
+                    &state.core,
+                    &state.control_adapter,
+                    preparation.intents,
+                    state.hardware_fake_renderer,
+                )
+                .await;
+                if had_intents {
+                    let mut active = active_usb.lock().await;
+                    if let Some(active) = active
+                        .as_mut()
+                        .filter(|active| active.runtime_generation == generation)
+                    {
+                        active.receipt_count += 1;
+                        eprintln!(
+                            "Agent Bridge H0 receipt generation={} receipt_count={} normalized_edges={}",
+                            generation,
+                            active.receipt_count,
+                            preparation.normalized_edges
+                        );
+                    }
+                }
+                if let Some(snapshot) = snapshot {
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+                if preparation.ready {
+                    let snapshot = state
+                        .core
+                        .lock()
+                        .await
+                        .set_hardware_connection(HardwareConnectionState::Available);
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+                publish_hardware_visual(&state.core, &runtime, &active_usb).await;
+            }
+            UsbRuntimeEvent::Disconnected { generation } => {
+                let disconnected = {
+                    let mut active = active_usb.lock().await;
+                    match *active {
+                        Some(current) if current.runtime_generation == generation => active.take(),
+                        _ => None,
+                    }
+                };
+                if let Some(disconnected) = disconnected {
+                    let _ordered = state.input_gate.lock().await;
+                    let intents = state
+                        .core
+                        .lock()
+                        .await
+                        .disconnect_hardware(disconnected.controller_token)
+                        .unwrap_or_default();
+                    if let Some(snapshot) = dispatch_hardware_intents(
+                        &state.core,
+                        &state.control_adapter,
+                        intents,
+                        state.hardware_fake_renderer,
+                    )
+                    .await
+                    {
+                        let _ = handle.emit("state_changed", snapshot);
+                    }
+                    eprintln!(
+                        "Agent Bridge H0 Vendor HID disconnected generation={generation}; held hardware state released"
+                    );
+                }
+                let snapshot = state
+                    .core
+                    .lock()
+                    .await
+                    .set_hardware_connection(HardwareConnectionState::Disconnected);
+                let _ = handle.emit("state_changed", snapshot);
+            }
+            UsbRuntimeEvent::PermissionDenied => {
+                let snapshot = state
+                    .core
+                    .lock()
+                    .await
+                    .set_hardware_connection(HardwareConnectionState::PermissionDenied);
+                let _ = handle.emit("state_changed", snapshot);
+                eprintln!(
+                    "Agent Bridge H0 USB open denied or failed; input remains disabled. Grant Input Monitoring if macOS requests it, then reconnect the device. Automatic retry remains active."
+                );
+            }
+            UsbRuntimeEvent::Unavailable => {
+                let snapshot = state
+                    .core
+                    .lock()
+                    .await
+                    .set_hardware_connection(HardwareConnectionState::Unavailable);
+                let _ = handle.emit("state_changed", snapshot);
+                eprintln!("Agent Bridge H0 USB adapter is unavailable on this system");
+            }
+        }
+    }
 }
 
 pub(crate) async fn apply_poll_future<PollFuture>(
@@ -430,16 +731,31 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
-            let core = AppCore::load(&app_data).map_err(std::io::Error::other)?;
+            let hardware_fake_renderer =
+                std::env::var("AGENT_BRIDGE_H0_FAKE_RENDERER").as_deref() == Ok("1");
+            let mut core = AppCore::load(&app_data).map_err(std::io::Error::other)?;
+            if hardware_fake_renderer {
+                core.enable_hardware_fake_renderer();
+            }
             let poll_adapter = core.adapter_clone();
             let core = Arc::new(Mutex::new(core));
             let control_adapter = Arc::new(Mutex::new(poll_adapter.clone()));
+            let (usb_runtime, usb_events) = usb_hid::spawn();
+            let active_usb = Arc::new(Mutex::new(None));
             app.manage(CoreState {
                 core,
                 control_adapter,
                 input_gate: Arc::new(Mutex::new(())),
                 bridge_gate: Arc::new(Mutex::new(())),
+                usb_runtime: usb_runtime.clone(),
+                active_usb: active_usb.clone(),
+                hardware_fake_renderer,
             });
+            if hardware_fake_renderer {
+                eprintln!(
+                    "Agent Bridge H0 hardware Fake Renderer is enabled; physical hardware intents will not invoke real Codex side effects"
+                );
+            }
             let tray_status = build_tray(app)?;
             app.manage(TrayStatus(tray_status));
             if std::env::args().any(|argument| argument == "--background") {
@@ -448,39 +764,59 @@ pub fn run() {
                 }
             }
 
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let mut poll_adapter = poll_adapter;
-                loop {
-                    let (changed, snapshot) = {
-                        let state = handle.state::<CoreState>();
-                        let _exclusive_bridge = state.bridge_gate.lock().await;
-                        let core = state.core.clone();
-                        let control_adapter = state.control_adapter.clone();
-                        apply_poll_future(core, control_adapter, async {
-                            let renderer = poll_adapter.refresh().await;
-                            let control_reset_required = poll_adapter.take_control_reset_required();
-                            let bridge = if renderer.is_err() {
-                                Some(poll_adapter.connect().await)
-                            } else {
-                                None
-                            };
-                            PollCycle {
-                                adapter: poll_adapter.clone(),
-                                renderer,
-                                bridge,
-                                control_reset_required,
-                            }
-                        })
-                        .await
-                    };
-                    if changed {
-                        update_tray_status(&handle, &snapshot);
-                        let _ = handle.emit("state_changed", snapshot);
+            let usb_handle = app.handle().clone();
+            tauri::async_runtime::spawn(run_usb_events(
+                usb_handle,
+                usb_runtime,
+                usb_events,
+                active_usb,
+            ));
+
+            if !hardware_fake_renderer {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut poll_adapter = poll_adapter;
+                    loop {
+                        let (changed, snapshot) = {
+                            let state = handle.state::<CoreState>();
+                            let _exclusive_bridge = state.bridge_gate.lock().await;
+                            let core = state.core.clone();
+                            let control_adapter = state.control_adapter.clone();
+                            apply_poll_future(core, control_adapter, async {
+                                let renderer = poll_adapter.refresh().await;
+                                let control_reset_required =
+                                    poll_adapter.take_control_reset_required();
+                                let bridge = if renderer.is_err() {
+                                    Some(poll_adapter.connect().await)
+                                } else {
+                                    None
+                                };
+                                PollCycle {
+                                    adapter: poll_adapter.clone(),
+                                    renderer,
+                                    bridge,
+                                    control_reset_required,
+                                }
+                            })
+                            .await
+                        };
+                        if changed {
+                            update_tray_status(&handle, &snapshot);
+                            let _ = handle.emit("state_changed", snapshot);
+                        }
+                        {
+                            let state = handle.state::<CoreState>();
+                            publish_hardware_visual(
+                                &state.core,
+                                &state.usb_runtime,
+                                &state.active_usb,
+                            )
+                            .await;
+                        }
+                        tokio::time::sleep(Duration::from_millis(750)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(750)).await;
-                }
-            });
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -498,11 +834,14 @@ pub fn run() {
 
 #[cfg(test)]
 mod integration_tests {
+    use std::sync::Arc;
+
     use crate::{
         config::{ConfigCommand, ImportPreviewItem},
         core::{AppCommand, BridgeCommand},
         model::VirtualInputEvent,
     };
+    use tokio::sync::Mutex;
 
     #[test]
     fn public_ipc_surface_is_small_and_typed() {
@@ -631,5 +970,29 @@ mod integration_tests {
         assert!(result.is_err());
         assert_eq!(launch_item_changes, vec![true, false]);
         assert!(!core.snapshot().preferences.launch_at_login);
+    }
+
+    #[tokio::test]
+    async fn hardware_fake_renderer_returns_receipts_without_dispatching_adapter() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = crate::core::AppCore::load(directory.path()).unwrap();
+        let adapter = core.adapter_clone();
+        let snapshot = super::dispatch_hardware_intents(
+            &Arc::new(Mutex::new(core)),
+            &Arc::new(Mutex::new(adapter)),
+            vec![crate::model::Intent::AgentEdge {
+                slot: 0,
+                thread_key: None,
+                pressed: true,
+            }],
+            true,
+        )
+        .await
+        .unwrap();
+
+        let receipt = snapshot.last_receipt.unwrap();
+        assert_eq!(receipt.outcome, crate::model::DispatchOutcome::Executed);
+        assert_eq!(receipt.capability.as_deref(), Some("h0FakeRenderer"));
+        assert!(receipt.request_id.starts_with("h0-fake-"));
     }
 }

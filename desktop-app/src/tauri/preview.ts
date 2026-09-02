@@ -33,6 +33,7 @@ let current: AppSnapshot = {
     codexVersion: "26.721.81911",
     fullyCompatible: true,
   },
+  hardwareConnection: "available",
   capabilities: [
     { id: "snapshot", label: "Native status snapshot", status: "supported" },
     { id: "agent-slots", label: "Six native Agent slots", status: "supported" },

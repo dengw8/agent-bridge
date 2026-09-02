@@ -447,6 +447,7 @@ pub struct DispatchReceipt {
 pub struct AppSnapshot {
     pub observed_at_ms: u64,
     pub bridge: BridgeSummary,
+    pub hardware_connection: HardwareConnectionState,
     pub capabilities: Vec<Capability>,
     pub agents: Vec<AgentSlot>,
     pub agent_source: AgentSource,
@@ -467,6 +468,7 @@ impl AppSnapshot {
         Self {
             observed_at_ms: now_ms(),
             bridge: BridgeSummary::default(),
+            hardware_connection: HardwareConnectionState::Disconnected,
             capabilities: Vec::new(),
             agents: (0..6).map(AgentSlot::empty).collect(),
             agent_source: AgentSource::Priority,
@@ -482,6 +484,17 @@ impl AppSnapshot {
             last_receipt: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HardwareConnectionState {
+    Disconnected,
+    Connecting,
+    PermissionDenied,
+    Incompatible,
+    Available,
+    Unavailable,
 }
 
 #[allow(dead_code)]

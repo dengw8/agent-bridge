@@ -119,6 +119,7 @@ export type AppSnapshot = {
     codexVersion?: string;
     fullyCompatible: boolean;
   };
+  hardwareConnection: "disconnected" | "connecting" | "permissionDenied" | "incompatible" | "available" | "unavailable";
   capabilities: Capability[];
   agents: AgentSlot[];
   agentSource: "recent" | "pinned" | "priority" | "custom";

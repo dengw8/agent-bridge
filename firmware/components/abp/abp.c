@@ -3,31 +3,6 @@
 #include <stdbool.h>
 #include <string.h>
 
-enum {
-    ABP_DEVICE_HELLO = 0x01,
-    ABP_AUTH_RESPONSE = 0x02,
-    ABP_INPUT_EVENT = 0x03,
-    ABP_INPUT_SNAPSHOT = 0x04,
-    ABP_DEVICE_STATUS = 0x05,
-    ABP_PONG = 0x06,
-    ABP_ACK = 0x07,
-    ABP_PROTOCOL_ERROR = 0x08,
-    ABP_UPDATE_STATUS = 0x09,
-    ABP_HOST_HELLO = 0x40,
-    ABP_AUTH_CHALLENGE = 0x41,
-    ABP_CLAIM_BEGIN = 0x42,
-    ABP_CLAIM_COMMIT = 0x43,
-    ABP_GET_INPUT_SNAPSHOT = 0x44,
-    ABP_GET_DEVICE_STATUS = 0x45,
-    ABP_VISUAL_STATE = 0x46,
-    ABP_SET_DEVICE_CONFIG = 0x47,
-    ABP_PING = 0x48,
-    ABP_HOST_GOING_AWAY = 0x49,
-    ABP_UPDATE_BEGIN = 0x4a,
-    ABP_UPDATE_CHUNK = 0x4b,
-    ABP_UPDATE_COMMIT = 0x4c,
-};
-
 static uint16_t read_u16(const uint8_t *bytes) {
     return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8u);
 }
