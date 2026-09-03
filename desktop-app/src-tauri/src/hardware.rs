@@ -439,6 +439,15 @@ impl HardwareController {
         self.receive(connection, &frame.encode(), inputs)
     }
 
+    pub(crate) fn receive_frame(
+        &mut self,
+        connection: ConnectionToken,
+        frame: &[u8],
+        inputs: &mut InputCoordinator,
+    ) -> ControllerOutcome {
+        self.receive(connection, frame, inputs)
+    }
+
     pub(crate) fn disconnect(
         &mut self,
         connection: ConnectionToken,
@@ -453,6 +462,7 @@ impl HardwareController {
         inputs.disconnect_hardware(connected.source)
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_visual_state(
         &mut self,
         state: HardwareVisualState,
@@ -475,10 +485,33 @@ impl HardwareController {
         }
         writes
     }
+
+    pub(crate) fn publish_visual_state_for(
+        &mut self,
+        connection: ConnectionToken,
+        state: HardwareVisualState,
+    ) -> Option<TransportWrite> {
+        let connected = self.sessions.get_mut(&connection)?;
+        if !connected.session.is_ready() {
+            return None;
+        }
+        let payload = state
+            .wire
+            .encode()
+            .expect("App-derived visual state is always valid");
+        Some(TransportWrite {
+            connection,
+            bytes: connected
+                .session
+                .host_frame(MessageType::VisualState, &payload)
+                .expect("fixed visual payload is valid"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TransportWrite {
+    #[allow(dead_code)]
     pub(crate) connection: ConnectionToken,
     pub(crate) bytes: [u8; FRAME_SIZE],
 }
@@ -495,7 +528,16 @@ pub(crate) struct HardwareVisualState {
 }
 
 impl HardwareVisualState {
+    #[cfg(test)]
     pub(crate) fn from_app_snapshot(snapshot: &AppSnapshot, revision: u32) -> Self {
+        Self::from_app_snapshot_for_transport(snapshot, revision, HardwareTransport::Usb)
+    }
+
+    pub(crate) fn from_app_snapshot_for_transport(
+        snapshot: &AppSnapshot,
+        revision: u32,
+        transport: HardwareTransport,
+    ) -> Self {
         let mut agents = [AgentVisualState::Empty; 6];
         let mut selected_mask = 0;
         for agent in &snapshot.agents {
@@ -536,7 +578,10 @@ impl HardwareVisualState {
                 },
                 bridge,
                 connection: VisualConnectionState::Ready,
-                profile: VisualProfile::Usb,
+                profile: match transport {
+                    HardwareTransport::Ble => VisualProfile::Bt1,
+                    HardwareTransport::Fake | HardwareTransport::Usb => VisualProfile::Usb,
+                },
                 battery_percent: 255,
                 power_flags: 0x02,
                 brightness_percent: 50,

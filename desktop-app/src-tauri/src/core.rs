@@ -257,8 +257,14 @@ impl AppCore {
     }
 
     pub(crate) fn attach_hardware(&mut self) -> ConnectionToken {
-        self.hardware
-            .attach(HardwareTransport::Usb, &mut self.inputs)
+        self.attach_hardware_transport(HardwareTransport::Usb)
+    }
+
+    pub(crate) fn attach_hardware_transport(
+        &mut self,
+        transport: HardwareTransport,
+    ) -> ConnectionToken {
+        self.hardware.attach(transport, &mut self.inputs)
     }
 
     pub(crate) fn set_hardware_connection(
@@ -290,6 +296,25 @@ impl AppCore {
         })
     }
 
+    pub(crate) fn prepare_hardware_frame(
+        &mut self,
+        connection: ConnectionToken,
+        frame: &[u8],
+    ) -> Result<HardwarePreparation, String> {
+        let outcome = self
+            .hardware
+            .receive_frame(connection, frame, &mut self.inputs);
+        let normalized_edges = outcome.events.len();
+        let intents = self.intents_for_events(outcome.events)?;
+        Ok(HardwarePreparation {
+            intents,
+            outbound: outcome.outbound,
+            normalized_edges,
+            rejection: outcome.rejection,
+            ready: self.hardware.is_ready(connection),
+        })
+    }
+
     pub(crate) fn disconnect_hardware(
         &mut self,
         connection: ConnectionToken,
@@ -298,11 +323,18 @@ impl AppCore {
         self.intents_for_events(events)
     }
 
-    pub(crate) fn hardware_visual_writes(&mut self) -> Vec<TransportWrite> {
+    pub(crate) fn hardware_visual_write_for(
+        &mut self,
+        connection: ConnectionToken,
+        transport: HardwareTransport,
+    ) -> Option<TransportWrite> {
         self.hardware_visual_revision = self.hardware_visual_revision.wrapping_add(1);
-        let visual =
-            HardwareVisualState::from_app_snapshot(&self.snapshot, self.hardware_visual_revision);
-        self.hardware.publish_visual_state(visual)
+        let visual = HardwareVisualState::from_app_snapshot_for_transport(
+            &self.snapshot,
+            self.hardware_visual_revision,
+            transport,
+        );
+        self.hardware.publish_visual_state_for(connection, visual)
     }
 
     fn intents_for_events(&mut self, events: Vec<InputEvent>) -> Result<Vec<Intent>, String> {
@@ -639,6 +671,52 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn ble_passport_uses_raw_abp_and_receives_the_bt1_visual_profile() {
+        use crate::protocol::{Frame, MessageType, VisualProfile, VisualState, WireInputSnapshot};
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut core = AppCore::load(directory.path()).unwrap();
+        core.snapshot.bridge.state = BridgeState::Ready;
+        let connection = core.attach_hardware_transport(HardwareTransport::Ble);
+
+        let mut hello_payload = [0u8; 24];
+        hello_payload[0..4].copy_from_slice(&0x5061_7373u32.to_le_bytes());
+        hello_payload[4..20].fill(0x42);
+        hello_payload[20..22].copy_from_slice(&1u16.to_le_bytes());
+        hello_payload[22] = 1;
+        let hello = Frame::new(MessageType::DeviceHello, 1, 10, &hello_payload)
+            .unwrap()
+            .encode();
+        let prepared = core.prepare_hardware_frame(connection, &hello).unwrap();
+        assert_eq!(prepared.outbound.len(), 1);
+
+        let snapshot_payload = WireInputSnapshot {
+            boot_id: 0x5061_7373,
+            agent_mask: 0,
+            action_mask: 0,
+            joystick_mask: 0,
+            encoder_pressed: false,
+        }
+        .encode()
+        .unwrap();
+        let snapshot = Frame::new(MessageType::InputSnapshot, 2, 20, &snapshot_payload)
+            .unwrap()
+            .encode();
+        assert!(
+            core.prepare_hardware_frame(connection, &snapshot)
+                .unwrap()
+                .ready
+        );
+
+        let write = core
+            .hardware_visual_write_for(connection, HardwareTransport::Ble)
+            .unwrap();
+        let frame = Frame::decode(&write.bytes).unwrap();
+        let visual = VisualState::decode(frame.payload()).unwrap();
+        assert_eq!(visual.profile, VisualProfile::Bt1);
     }
 
     #[test]

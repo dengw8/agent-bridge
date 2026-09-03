@@ -47,6 +47,8 @@ function infoPlist() {
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Agent Bridge uses Bluetooth to show live Agent status on an AI Passport and receive its three-button controls.</string>
 </dict>
 </plist>
 `;

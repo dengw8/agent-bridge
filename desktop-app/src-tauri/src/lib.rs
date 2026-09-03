@@ -6,6 +6,7 @@ mod diagnostics;
 mod hardware;
 mod input;
 mod model;
+mod passport_ble;
 pub mod protocol;
 mod usb_hid;
 
@@ -16,9 +17,10 @@ use config::ConfigCommand;
 use core::{AppCommand, AppCommandResult, AppCore, BridgeCommand, ConfigResult};
 use hardware::ConnectionToken;
 use model::{
-    AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, HardwareConnectionState, Intent,
-    VirtualInputEvent,
+    AppSnapshot, BridgeState, BridgeSummary, DispatchReceipt, HardwareConnectionState,
+    HardwareTransport, Intent, VirtualInputEvent,
 };
+use passport_ble::{PassportBleEvent, PassportBleHandle};
 use protocol::{Direction as ProtocolDirection, Frame, MessageType, ProtocolError};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -35,6 +37,8 @@ struct CoreState {
     bridge_gate: Arc<Mutex<()>>,
     usb_runtime: UsbRuntimeHandle,
     active_usb: Arc<Mutex<Option<ActiveUsbConnection>>>,
+    passport_ble: Option<PassportBleHandle>,
+    active_passport: Arc<Mutex<Option<ActivePassportConnection>>>,
     hardware_fake_renderer: bool,
 }
 
@@ -47,6 +51,14 @@ struct ActiveUsbConnection {
     device_clock_offset_ms: Option<f64>,
     host_edge_count: u64,
     receipt_count: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActivePassportConnection {
+    runtime_generation: u64,
+    controller_token: ConnectionToken,
+    published_title_mask: u8,
+    published_titles: [[u8; protocol::FRAME_SIZE]; 6],
 }
 
 pub(crate) struct PollCycle {
@@ -160,11 +172,11 @@ async fn publish_hardware_visual(
     let Some(active) = *active_usb.lock().await else {
         return;
     };
-    let writes = core.lock().await.hardware_visual_writes();
-    for write in writes {
-        if write.connection != active.controller_token {
-            continue;
-        }
+    let write = core
+        .lock()
+        .await
+        .hardware_visual_write_for(active.controller_token, HardwareTransport::Usb);
+    if let Some(write) = write {
         match write.usb_report() {
             Ok(report) => {
                 if let Err(error) = runtime.try_write(active.runtime_generation, report) {
@@ -172,6 +184,212 @@ async fn publish_hardware_visual(
                 }
             }
             Err(_) => eprintln!("Agent Bridge H0 refused an invalid visual output frame"),
+        }
+    }
+}
+
+fn send_passport_frames(
+    runtime: &PassportBleHandle,
+    runtime_generation: u64,
+    frames: impl IntoIterator<Item = [u8; protocol::FRAME_SIZE]>,
+) {
+    for bytes in frames {
+        if let Err(error) = runtime.try_write(runtime_generation, bytes) {
+            eprintln!("Agent Passport BLE output rejected: {error}");
+        }
+    }
+}
+
+async fn publish_passport_visual(
+    core: &Arc<Mutex<AppCore>>,
+    runtime: &PassportBleHandle,
+    active_passport: &Arc<Mutex<Option<ActivePassportConnection>>>,
+) {
+    let Some(active) = *active_passport.lock().await else {
+        return;
+    };
+    let (write, title_packets) = {
+        let mut core = core.lock().await;
+        let titles = passport_ble::display_title_packets(&core.snapshot());
+        let write = core.hardware_visual_write_for(active.controller_token, HardwareTransport::Ble);
+        (write, titles)
+    };
+    let Some(write) = write else {
+        return;
+    };
+
+    let mut connection = active_passport.lock().await;
+    let Some(current) = connection.as_mut().filter(|current| {
+        current.runtime_generation == active.runtime_generation
+            && current.controller_token == active.controller_token
+    }) else {
+        return;
+    };
+    for (slot, packet) in title_packets.into_iter().enumerate() {
+        const ALL_TITLES: u8 = 0x3f;
+        let slot_mask = 1u8 << slot;
+        let changed = current.published_title_mask & slot_mask == 0
+            || current.published_titles[slot] != packet;
+        if changed {
+            match runtime.try_write_display(current.runtime_generation, packet) {
+                Ok(()) => {
+                    current.published_titles[slot] = packet;
+                    current.published_title_mask =
+                        (current.published_title_mask | slot_mask) & ALL_TITLES;
+                }
+                Err(error) => eprintln!("Agent Passport BLE title output rejected: {error}"),
+            }
+        }
+    }
+    if let Err(error) = runtime.try_write(current.runtime_generation, write.bytes) {
+        eprintln!("Agent Passport BLE visual output rejected: {error}");
+    }
+}
+
+async fn run_passport_events(
+    handle: AppHandle,
+    runtime: PassportBleHandle,
+    mut events: tokio::sync::mpsc::Receiver<PassportBleEvent>,
+    active_passport: Arc<Mutex<Option<ActivePassportConnection>>>,
+) {
+    while let Some(event) = events.recv().await {
+        let state = handle.state::<CoreState>();
+        match event {
+            PassportBleEvent::Searching => {
+                if active_passport.lock().await.is_none() {
+                    let snapshot = state
+                        .core
+                        .lock()
+                        .await
+                        .set_hardware_connection(HardwareConnectionState::Connecting);
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+            }
+            PassportBleEvent::Connected { generation } => {
+                if let Some(previous) = active_passport.lock().await.take() {
+                    let _ordered = state.input_gate.lock().await;
+                    let intents = state
+                        .core
+                        .lock()
+                        .await
+                        .disconnect_hardware(previous.controller_token)
+                        .unwrap_or_default();
+                    let _ = dispatch_hardware_intents(
+                        &state.core,
+                        &state.control_adapter,
+                        intents,
+                        state.hardware_fake_renderer,
+                    )
+                    .await;
+                }
+                let token = state
+                    .core
+                    .lock()
+                    .await
+                    .attach_hardware_transport(HardwareTransport::Ble);
+                *active_passport.lock().await = Some(ActivePassportConnection {
+                    runtime_generation: generation,
+                    controller_token: token,
+                    published_title_mask: 0,
+                    published_titles: [[0; protocol::FRAME_SIZE]; 6],
+                });
+                eprintln!("Agent Passport BLE connected generation={generation}");
+            }
+            PassportBleEvent::Frame {
+                generation,
+                bytes,
+                received_monotonic_ms,
+            } => {
+                let token = {
+                    let active = active_passport.lock().await;
+                    let Some(active) = active
+                        .as_ref()
+                        .filter(|active| active.runtime_generation == generation)
+                    else {
+                        continue;
+                    };
+                    active.controller_token
+                };
+                let _ordered = state.input_gate.lock().await;
+                let preparation = match state
+                    .core
+                    .lock()
+                    .await
+                    .prepare_hardware_frame(token, &bytes)
+                {
+                    Ok(preparation) => preparation,
+                    Err(error) => {
+                        eprintln!("Agent Passport BLE input failed closed: {error}");
+                        continue;
+                    }
+                };
+                send_passport_frames(&runtime, generation, preparation.outbound);
+                if let Some(rejection) = preparation.rejection {
+                    eprintln!(
+                        "Agent Passport BLE session rejected frame at {received_monotonic_ms:.3}ms: {rejection:?}"
+                    );
+                }
+                if let Some(snapshot) = dispatch_hardware_intents(
+                    &state.core,
+                    &state.control_adapter,
+                    preparation.intents,
+                    state.hardware_fake_renderer,
+                )
+                .await
+                {
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+                if preparation.ready {
+                    let snapshot = state
+                        .core
+                        .lock()
+                        .await
+                        .set_hardware_connection(HardwareConnectionState::Available);
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+                publish_passport_visual(&state.core, &runtime, &active_passport).await;
+            }
+            PassportBleEvent::Disconnected { generation } => {
+                let disconnected = {
+                    let mut active = active_passport.lock().await;
+                    match *active {
+                        Some(current) if current.runtime_generation == generation => active.take(),
+                        _ => None,
+                    }
+                };
+                if let Some(disconnected) = disconnected {
+                    let _ordered = state.input_gate.lock().await;
+                    let intents = state
+                        .core
+                        .lock()
+                        .await
+                        .disconnect_hardware(disconnected.controller_token)
+                        .unwrap_or_default();
+                    let _ = dispatch_hardware_intents(
+                        &state.core,
+                        &state.control_adapter,
+                        intents,
+                        state.hardware_fake_renderer,
+                    )
+                    .await;
+                    let snapshot = state
+                        .core
+                        .lock()
+                        .await
+                        .set_hardware_connection(HardwareConnectionState::Disconnected);
+                    let _ = handle.emit("state_changed", snapshot);
+                }
+                eprintln!("Agent Passport BLE disconnected generation={generation}");
+            }
+            PassportBleEvent::Unavailable => {
+                let snapshot = state
+                    .core
+                    .lock()
+                    .await
+                    .set_hardware_connection(HardwareConnectionState::Unavailable);
+                let _ = handle.emit("state_changed", snapshot);
+                eprintln!("Agent Passport BLE is unavailable on this system");
+            }
         }
     }
 }
@@ -733,6 +951,8 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             let hardware_fake_renderer =
                 std::env::var("AGENT_BRIDGE_H0_FAKE_RENDERER").as_deref() == Ok("1");
+            let passport_ble_enabled =
+                std::env::var("AGENT_BRIDGE_PASSPORT_BLE").as_deref() == Ok("1");
             let mut core = AppCore::load(&app_data).map_err(std::io::Error::other)?;
             if hardware_fake_renderer {
                 core.enable_hardware_fake_renderer();
@@ -742,6 +962,13 @@ pub fn run() {
             let control_adapter = Arc::new(Mutex::new(poll_adapter.clone()));
             let (usb_runtime, usb_events) = usb_hid::spawn();
             let active_usb = Arc::new(Mutex::new(None));
+            let (passport_ble, passport_events) = if passport_ble_enabled {
+                let (runtime, events) = passport_ble::spawn();
+                (Some(runtime), Some(events))
+            } else {
+                (None, None)
+            };
+            let active_passport = Arc::new(Mutex::new(None));
             app.manage(CoreState {
                 core,
                 control_adapter,
@@ -749,6 +976,8 @@ pub fn run() {
                 bridge_gate: Arc::new(Mutex::new(())),
                 usb_runtime: usb_runtime.clone(),
                 active_usb: active_usb.clone(),
+                passport_ble: passport_ble.clone(),
+                active_passport: active_passport.clone(),
                 hardware_fake_renderer,
             });
             if hardware_fake_renderer {
@@ -771,6 +1000,18 @@ pub fn run() {
                 usb_events,
                 active_usb,
             ));
+            if let (Some(runtime), Some(events)) = (passport_ble, passport_events) {
+                let passport_handle = app.handle().clone();
+                tauri::async_runtime::spawn(run_passport_events(
+                    passport_handle,
+                    runtime,
+                    events,
+                    active_passport,
+                ));
+                eprintln!(
+                    "Agent Passport BLE discovery is enabled for device AgentPassport"
+                );
+            }
 
             if !hardware_fake_renderer {
                 let handle = app.handle().clone();
@@ -812,6 +1053,14 @@ pub fn run() {
                                 &state.active_usb,
                             )
                             .await;
+                            if let Some(passport_ble) = &state.passport_ble {
+                                publish_passport_visual(
+                                    &state.core,
+                                    passport_ble,
+                                    &state.active_passport,
+                                )
+                                .await;
+                            }
                         }
                         tokio::time::sleep(Duration::from_millis(750)).await;
                     }

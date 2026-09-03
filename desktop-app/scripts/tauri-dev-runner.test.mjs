@@ -103,5 +103,6 @@ describe("macOS Tauri development runner", () => {
     const plist = await readFile(join(appRoot, "Contents", "Info.plist"), "utf8");
     expect(plist).toContain("<string>com.dengwang.agent-bridge</string>");
     expect(plist).toContain("<string>icon.icns</string>");
+    expect(plist).toContain("<key>NSBluetoothAlwaysUsageDescription</key>");
   });
 });

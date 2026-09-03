@@ -86,6 +86,11 @@ cargo run --locked --bin h0-usb-evidence -- /path/to/new/evidence-directory
 cargo run --locked --bin h0-visual-replay
 ```
 
+The separate FoloToy AI Passport Agent Twin target is documented in
+[`devices/ai-passport-avatar`](../devices/ai-passport-avatar/README.md). Enable
+its opt-in BLE runtime with `AGENT_BRIDGE_PASSPORT_BLE=1`; ordinary launches
+continue to use only the existing USB runtime.
+
 ## Security boundary
 
 Renderer scripts are bundled resources selected by typed Rust commands.

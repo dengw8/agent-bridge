@@ -1,0 +1,21 @@
+#pragma once
+
+#include "driver/ledc.h"
+#include "driver/spi_master.h"
+#include "hal/adc_types.h"
+
+#define PASSPORT_LCD_WIDTH 240
+#define PASSPORT_LCD_HEIGHT 320
+#define PASSPORT_LCD_HOST SPI2_HOST
+#define PASSPORT_LCD_MOSI 9
+#define PASSPORT_LCD_CLOCK 8
+#define PASSPORT_LCD_CS 1
+#define PASSPORT_LCD_DC 20
+#define PASSPORT_LCD_RESET (-1)
+#define PASSPORT_LCD_BACKLIGHT 21
+#define PASSPORT_LCD_CLOCK_HZ (40 * 1000 * 1000)
+
+#define PASSPORT_BUTTON_ADC_UNIT ADC_UNIT_1
+#define PASSPORT_BUTTON_ADC_CHANNEL ADC_CHANNEL_0
+#define PASSPORT_BUTTON_COUNT 3
+#define PASSPORT_BUTTON_MV_RANGES {{0, 150}, {150, 447}, {447, 1900}}
